@@ -6,7 +6,7 @@
 
 #include "Config.h"
 #include "visual_odometry.h"
-
+#include "g2o_types.h"
 namespace myslam {
 	VisualOdometry::VisualOdometry() :
 		state_(INITIALIZING), ref_(nullptr), curr_(nullptr), map_(new Map), num_lost_(0), num_inliers_(0)
@@ -84,23 +84,69 @@ namespace myslam {
 			0, 0, 1);
 		Mat rvec, tvec, inliers,r_mat;
 		cv::solvePnPRansac(pts3d, pts2d, K, Mat(), rvec, tvec, false, 100, 4.0, 0.99, inliers);
-		//转换为R矩阵
-		cv::Rodrigues(rvec, r_mat);
-		Eigen::Matrix3d R;
-		for (size_t i = 0; i < 3; i++)
-		{
-			for (size_t j = 0; j < 3; j++)
-			{
-				R(i, j) = r_mat.at<double>(i, j);
-			}
-		}
-		num_inliers_ = inliers.rows;
-		cout << "pnp inliers: " << num_inliers_ << endl;
-		T_c_r_estimated_ = SE3d(
-			SO3d(R),
-			Vector3d(tvec.at<double>(0, 0), tvec.at<double>(1, 0), tvec.at<double>(2, 0))
-		);
 
+		cout << "pnp inliers: " << num_inliers_ << endl;
+
+		num_inliers_ = inliers.rows;
+
+	
+		// 非线性优化
+		if(true)
+		{
+			typedef g2o::BlockSolver<g2o::BlockSolverTraits<6, 2>> Block;
+			Block::LinearSolverType* linearSolver = new g2o::LinearSolverDense<Block::PoseMatrixType>();
+			Block* solver_ptr = new Block(linearSolver);
+			g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+			g2o::SparseOptimizer optimizer;
+			optimizer.setAlgorithm(solver);
+			//添加节点
+			g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap();
+			pose->setId(0);
+			pose->setEstimate(g2o::SE3Quat(
+				T_c_r_estimated_.rotationMatrix(), T_c_r_estimated_.translation()
+			));
+			//pose->setEstimate(g2o::SE3Quat(R, T)); // 设置初始值
+			optimizer.addVertex(pose);
+			//添加边
+			for (int i = 0; i < inliers.rows; i++)
+			{
+				int index = inliers.at<int>(i, 0);
+				EdgeProjectXYZ2UVPoseOnly* edge = new EdgeProjectXYZ2UVPoseOnly();
+				edge->setId(i);
+				edge->setVertex(0, pose);
+				edge->camera_ = curr_->camera_.get();
+				edge->point_ = Vector3d(pts3d[index].x, pts3d[index].y, pts3d[index].z);
+				edge->setMeasurement(Vector2d(pts2d[index].x, pts2d[index].y));
+				edge->setInformation(Eigen::Matrix2d::Identity());
+				optimizer.addEdge(edge);
+			}
+			optimizer.initializeOptimization();
+			optimizer.optimize(10);
+
+
+			T_c_r_estimated_ = SE3d(
+				pose->estimate().rotation(),
+				pose->estimate().translation()
+			);
+		}
+		else {
+			//转换为R矩阵
+			cv::Rodrigues(rvec, r_mat);
+			Eigen::Matrix3d R;
+			for (size_t i = 0; i < 3; i++)
+			{
+				for (size_t j = 0; j < 3; j++)
+				{
+					R(i, j) = r_mat.at<double>(i, j);
+				}
+			}
+			Vector3d T(tvec.at<double>(0, 0), tvec.at<double>(1, 0), tvec.at<double>(2, 0));
+			T_c_r_estimated_ = SE3d(
+				SO3d(R),
+				T
+			);
+		}
+		
 	}
 
 	void VisualOdometry::setRef3DPoints()

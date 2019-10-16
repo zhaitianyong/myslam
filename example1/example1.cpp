@@ -15,11 +15,11 @@
 
 int main(int argc, char** argv)
 {
-	if (argc != 2)
+	/*if (argc != 2)
 	{
 		cout << "usage: run_vo parameter_file" << endl;
 		return 1;
-	}
+	}*/
 
 	myslam::Config::setParameterFile("F:/MyGitHub/SLAM/Source/myslam/myslam/config/default.yaml");
 	myslam::VisualOdometry::Ptr vo(new myslam::VisualOdometry);

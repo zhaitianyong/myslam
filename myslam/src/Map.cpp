@@ -1,4 +1,4 @@
-#include "src/Map.h"
+#include "Map.h"
 
 namespace myslam {
 

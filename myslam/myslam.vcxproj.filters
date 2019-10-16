@@ -45,6 +45,9 @@
     <ClInclude Include="src\visual_odometry.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\g2o_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -72,6 +75,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\visual_odometry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\g2o_types.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
