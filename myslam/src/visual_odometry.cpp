@@ -9,7 +9,7 @@
 #include "g2o_types.h"
 namespace myslam {
 	VisualOdometry::VisualOdometry() :
-		state_(INITIALIZING), ref_(nullptr), curr_(nullptr), map_(new Map), num_lost_(0), num_inliers_(0)
+		state_(INITIALIZING), ref_(nullptr), curr_(nullptr), map_(new Map), num_lost_(0), num_inliers_(0), matcher_flann_(new cv::flann::LshIndexParams(5, 10, 2))
 	{
 		/*num_of_features_ = Config::get<int>("number_of_features");
 		scale_factor_ = Config::get<double>("scale_factor");
@@ -28,7 +28,7 @@ namespace myslam {
 		min_inliers_ = Config::config_->min_inliers;
 		key_frame_min_rot = Config::config_->key_frame_min_rot;
 		key_frame_min_trans = Config::config_->key_frame_min_trans;
-
+		map_point_erase_ratio_ = Config::config_->map_point_erase_ratio;
 		orb_ = cv::ORB::create(num_of_features_, scale_factor_, level_pyramid_);
 	}
 
@@ -48,23 +48,42 @@ namespace myslam {
 
 	void VisualOdometry::featureMatching() {
 		vector<cv::DMatch> matches;
-		cv::BFMatcher matcher(cv::NORM_HAMMING);
-		matcher.match(descriptors_ref_, descriptors_curr_, matches);
+		// select the candidates in map 
+		Mat desp_map;
+		vector<MapPoint::Ptr> candidate;
+		for (auto& allpoints : map_->map_points_)
+		{
+			MapPoint::Ptr& p = allpoints.second;
+			// check if p in curr frame image 
+			if (curr_->isInFrame(p->pos_))
+			{
+				// add to candidate 
+				p->visible_times_++;
+				candidate.push_back(p);
+				desp_map.push_back(p->descriptor_);
+			}
+		}
+
+		matcher_flann_.match(desp_map, descriptors_curr_, matches);
+		// select the best matches
 		float min_dis = std::min_element(
 			matches.begin(), matches.end(),
-			[](const cv::DMatch& m1, const cv::DMatch& m2) {
+			[](const cv::DMatch& m1, const cv::DMatch& m2)
+		{
 			return m1.distance < m2.distance;
 		})->distance;
 
-		feature_matches_.clear();
+		match_3dpts_.clear();
+		match_2dkp_index_.clear();
 		for (cv::DMatch& m : matches)
 		{
-			if (m.distance <  max<float>(min_dis*match_ratio_, 30))
+			if (m.distance < max<float>(min_dis*match_ratio_, 30.0))
 			{
-				feature_matches_.push_back(m);
+				match_3dpts_.push_back(candidate[m.queryIdx]);
+				match_2dkp_index_.push_back(m.trainIdx);
 			}
 		}
-		cout << "good matches: " << feature_matches_.size() << endl;
+		cout << "good matches: " << match_3dpts_.size() << endl;
 
 	}
 
@@ -73,9 +92,13 @@ namespace myslam {
 		vector<cv::Point3f> pts3d;
 		vector<cv::Point2f> pts2d;
 
-		for (cv::DMatch m : feature_matches_) {
-			pts3d.push_back(pts_3d_ref_[m.queryIdx]);
-			pts2d.push_back(keypoints_curr_[m.trainIdx].pt);
+		for (int index : match_2dkp_index_)
+		{
+			pts2d.push_back(keypoints_curr_[index].pt);
+		}
+		for (MapPoint::Ptr pt : match_3dpts_)
+		{
+			pts3d.push_back(pt->getPositionCV());
 		}
 
 		Mat K = (cv::Mat_<double>(3, 3) <<
@@ -84,14 +107,24 @@ namespace myslam {
 			0, 0, 1);
 		Mat rvec, tvec, inliers,r_mat;
 		cv::solvePnPRansac(pts3d, pts2d, K, Mat(), rvec, tvec, false, 100, 4.0, 0.99, inliers);
+		num_inliers_ = inliers.rows;
 
 		cout << "pnp inliers: " << num_inliers_ << endl;
 
-		num_inliers_ = inliers.rows;
-
+		//转换为R矩阵
+		cv::Rodrigues(rvec, r_mat);
+		Eigen::Matrix3d R;
+		for (size_t i = 0; i < 3; i++)
+		{
+			for (size_t j = 0; j < 3; j++)
+			{
+				R(i, j) = r_mat.at<double>(i, j);
+			}
+		}
+		Vector3d T(tvec.at<double>(0, 0), tvec.at<double>(1, 0), tvec.at<double>(2, 0));
+		T_c_w_estimated_ = SE3d(SO3d(R), T);
 	
 		// 非线性优化
-		if(true)
 		{
 			typedef g2o::BlockSolver<g2o::BlockSolverTraits<6, 2>> Block;
 			Block::LinearSolverType* linearSolver = new g2o::LinearSolverDense<Block::PoseMatrixType>();
@@ -103,9 +136,8 @@ namespace myslam {
 			g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap();
 			pose->setId(0);
 			pose->setEstimate(g2o::SE3Quat(
-				T_c_r_estimated_.rotationMatrix(), T_c_r_estimated_.translation()
+				T_c_w_estimated_.rotationMatrix(), T_c_w_estimated_.translation()
 			));
-			//pose->setEstimate(g2o::SE3Quat(R, T)); // 设置初始值
 			optimizer.addVertex(pose);
 			//添加边
 			for (int i = 0; i < inliers.rows; i++)
@@ -119,59 +151,72 @@ namespace myslam {
 				edge->setMeasurement(Vector2d(pts2d[index].x, pts2d[index].y));
 				edge->setInformation(Eigen::Matrix2d::Identity());
 				optimizer.addEdge(edge);
+				// set the inlier map points 
+				match_3dpts_[index]->matched_times_++;
 			}
 			optimizer.initializeOptimization();
 			optimizer.optimize(10);
 
 
-			T_c_r_estimated_ = SE3d(
+			T_c_w_estimated_ = SE3d(
 				pose->estimate().rotation(),
 				pose->estimate().translation()
 			);
-		}
-		else {
-			//转换为R矩阵
-			cv::Rodrigues(rvec, r_mat);
-			Eigen::Matrix3d R;
-			for (size_t i = 0; i < 3; i++)
-			{
-				for (size_t j = 0; j < 3; j++)
-				{
-					R(i, j) = r_mat.at<double>(i, j);
-				}
-			}
-			Vector3d T(tvec.at<double>(0, 0), tvec.at<double>(1, 0), tvec.at<double>(2, 0));
-			T_c_r_estimated_ = SE3d(
-				SO3d(R),
-				T
-			);
-		}
-		
-	}
-
-	void VisualOdometry::setRef3DPoints()
-	{
-		pts_3d_ref_.clear();
-		descriptors_ref_ = Mat();
-		for (size_t i = 0; i < keypoints_curr_.size(); i++)
-		{
-			double d = ref_->findDepth(keypoints_curr_[i]);
-			if (d>0)
-			{
-				Vector3d p_cam = ref_->camera_->pixel2camera(Vector2d(keypoints_curr_[i].pt.x, keypoints_curr_[i].pt.y), d);
-				pts_3d_ref_.push_back(cv::Point3f(p_cam(0, 0), p_cam(1, 0), p_cam(2, 0)));
-				descriptors_ref_.push_back(descriptors_curr_.row(i));
-
-			}
 		}
 	}
 
 	void VisualOdometry::addKeyFrame()
 	{
 		cout << "adding a key-frame" << endl;
-		map_->insertKeyFrame(curr_);
-	}
+		if (map_->keyframes_.empty())
+		{
+			// first key-frame, add all 3d points into map
+			for (size_t i = 0; i<keypoints_curr_.size(); i++)
+			{
+				double d = curr_->findDepth(keypoints_curr_[i]);
+				if (d < 0)
+					continue;
+				Vector3d p_world = ref_->camera_->pixel2world(
+					Vector2d(keypoints_curr_[i].pt.x, keypoints_curr_[i].pt.y), curr_->T_c_w_, d
+				);
+				Vector3d n = p_world - ref_->getCameraCenter();
+				n.normalize();
+				MapPoint::Ptr map_point = MapPoint::createMapPoint(
+					p_world, n, descriptors_curr_.row(i).clone(), curr_.get()
+				);
+				map_->insertMapPoint(map_point);
+			}
+		}
 
+		map_->insertKeyFrame(curr_);
+		ref_ = curr_;
+
+	}
+	void VisualOdometry::addMapPoints()
+	{
+		// add the new map points into map
+		vector<bool> matched(keypoints_curr_.size(), false);
+		for (int index : match_2dkp_index_)
+			matched[index] = true;
+		for (int i = 0; i<keypoints_curr_.size(); i++)
+		{
+			if (matched[i] == true)
+				continue;
+			double d = ref_->findDepth(keypoints_curr_[i]);
+			if (d<0)
+				continue;
+			Vector3d p_world = ref_->camera_->pixel2world(
+				Vector2d(keypoints_curr_[i].pt.x, keypoints_curr_[i].pt.y),
+				curr_->T_c_w_, d
+			);
+			Vector3d n = p_world - ref_->getCameraCenter();
+			n.normalize();
+			MapPoint::Ptr map_point = MapPoint::createMapPoint(
+				p_world, n, descriptors_curr_.row(i).clone(), curr_.get()
+			);
+			map_->insertMapPoint(map_point);
+		}
+	}
 	bool VisualOdometry::checkEstimatedPose()
 	{
 		if (num_inliers_ < min_inliers_)
@@ -179,7 +224,9 @@ namespace myslam {
 			cout << "reject because inlier is too small: " << num_inliers_ << endl;
 			return false;
 		}
-		Sophus::Vector6d d = T_c_r_estimated_.log();
+		// if the motion is too large, it is probably wrong
+		SE3d T_r_c = ref_->T_c_w_ * T_c_w_estimated_.inverse();
+		Sophus::Vector6d d = T_r_c.log();
 
 		if (d.norm() > 5.0)
 		{
@@ -191,13 +238,66 @@ namespace myslam {
 
 	bool VisualOdometry::checkKeyFrame()
 	{
-		Sophus::Vector6d d = T_c_r_estimated_.log();
+		SE3d T_r_c = ref_->T_c_w_ * T_c_w_estimated_.inverse();
+
+		Sophus::Vector6d d = T_r_c.log();
 		Vector3d trans = d.head<3>();
 		Vector3d rot = d.tail<3>();
 		if (rot.norm() >key_frame_min_rot || trans.norm() >key_frame_min_trans)
 			return true;
 		return false;
 	}
+
+	void VisualOdometry::optimizeMap()
+	{
+		// remove the hardly seen and no visible points 
+		for (auto iter = map_->map_points_.begin(); iter != map_->map_points_.end(); )
+		{
+			if (!curr_->isInFrame(iter->second->pos_))
+			{
+				iter = map_->map_points_.erase(iter);
+				continue;
+			}
+			float match_ratio = float(iter->second->matched_times_) / iter->second->visible_times_;
+			if (match_ratio < map_point_erase_ratio_)
+			{
+				iter = map_->map_points_.erase(iter);
+				continue;
+			}
+
+			double angle = getViewAngle(curr_, iter->second);
+			if (angle > M_PI / 6.)
+			{
+				iter = map_->map_points_.erase(iter);
+				continue;
+			}
+			if (iter->second->good_ == false)
+			{
+				// TODO try triangulate this map point 
+			}
+			iter++;
+		}
+		addMapPoints();
+		
+		if (match_2dkp_index_.size()<200)
+			addMapPoints();
+		if (map_->map_points_.size() > 1000)
+		{
+			// TODO map is too large, remove some one 
+			map_point_erase_ratio_ += 0.05;
+		}
+		else
+			map_point_erase_ratio_ = 0.1;
+		
+		cout << "map points: " << map_->map_points_.size() << endl;
+	}
+	double VisualOdometry::getViewAngle(Frame::Ptr frame, MapPoint::Ptr point)
+	{
+		Vector3d n = point->pos_ - frame->getCameraCenter();
+		n.normalize();
+		return acos(n.transpose()*point->norm_);
+	}
+
 
 	bool VisualOdometry::addFrame(Frame::Ptr frame) {
 		switch (state_)
@@ -206,15 +306,15 @@ namespace myslam {
 		{
 			state_ = OK;
 			curr_ = ref_ = frame;
-			map_->insertKeyFrame(frame);
 			extractKeyPoints();
 			computeDescriptors();
-			setRef3DPoints();
+			addKeyFrame();
 			break;
 		}
 		case VisualOdometry::OK:
 		{
 			curr_ = frame;
+			curr_->T_c_w_ = ref_->T_c_w_;
 			extractKeyPoints();
 			computeDescriptors();
 			featureMatching();
@@ -222,11 +322,10 @@ namespace myslam {
 			poseEstimationPnP();
 			if (checkEstimatedPose())
 			{
-				curr_->T_c_w_ = T_c_r_estimated_ * ref_->T_c_w_;
-				ref_ = curr_;
-				setRef3DPoints();
+				curr_->T_c_w_ = T_c_w_estimated_;
+				optimizeMap();
 				num_lost_ = 0;
-				if (checkKeyFrame())
+				if (checkKeyFrame() == true) // is a key-frame
 				{
 					addKeyFrame();
 				}
@@ -252,4 +351,5 @@ namespace myslam {
 		return true;
 
 	}
+
 }

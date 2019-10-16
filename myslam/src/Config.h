@@ -38,6 +38,7 @@ namespace myslam {
 		int min_inliers = 10;
 		double key_frame_min_rot = 0.1;
 		double key_frame_min_trans = 0.1;
+		double map_point_erase_ratio = 0.1;
 		string dataset_dir;
 		float fx, fy, cx, cy, depth_scale;
 	};

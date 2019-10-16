@@ -6,8 +6,10 @@
 
 #include <fstream>
 #include <boost/timer.hpp>
+#include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
-#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/viz.hpp> 
 
 #include "../myslam/src/Config.h"
@@ -40,10 +42,10 @@ int main(int argc, char** argv)
 	{
 		string rgb_time, rgb_file, depth_time, depth_file;
 		fin >> rgb_time >> rgb_file >> depth_time >> depth_file;
-		cout << rgb_time;
+	/*	cout << rgb_time;
 		cout << " " << rgb_file;
 		cout << " " << depth_time;
-		cout << " " << depth_file << endl;
+		cout << " " << depth_file << endl;*/
 
 		rgb_times.push_back(atof(rgb_time.c_str()));
 		depth_times.push_back(atof(depth_time.c_str()));
@@ -106,8 +108,16 @@ int main(int argc, char** argv)
 				Tcw.translation()(0, 0), Tcw.translation()(1, 0), Tcw.translation()(2, 0)
 			)
 		);
+		Mat img_show = color.clone();
+		for (auto& pt : vo->map_->map_points_)
+		{
+			myslam::MapPoint::Ptr p = pt.second;
+			Vector2d pixel = pFrame->camera_->world2pixel(p->pos_, pFrame->T_c_w_);
+			cv::circle(img_show, cv::Point2f(pixel(0, 0), pixel(1, 0)), 5, cv::Scalar(0, 255, 0), 2);
+			
+		}
 
-		cv::imshow("image", color);
+		cv::imshow("image", img_show);
 		cv::waitKey(1);
 		vis.setWidgetPose("Camera", M);
 		vis.spinOnce(1, false);

@@ -10,6 +10,7 @@ using Eigen::Vector3d;
 using Sophus::SE3d;
 using Sophus::SO3d;
 #include <opencv2\core.hpp>
+#include <opencv2\highgui.hpp>
 using cv::Mat;
 
 // std
@@ -22,3 +23,4 @@ using cv::Mat;
 #include <map>
 #include <cmath>
 using namespace std;
+

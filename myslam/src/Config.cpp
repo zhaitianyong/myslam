@@ -42,6 +42,7 @@ namespace myslam {
 		config_->min_inliers = fs["min_inliers"];
 		config_->key_frame_min_rot = fs["keyframe_rotation"];
 		config_->key_frame_min_trans = fs["keyframe_translation"];
+		config_->map_point_erase_ratio = fs["map_point_erase_ratio"];
 	}
 
 }
